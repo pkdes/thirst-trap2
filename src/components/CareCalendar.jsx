@@ -22,6 +22,7 @@ export default function CareCalendar({
   selectedDay,
   targetDate,
   onDayTap,
+  onEntryTap,
 }) {
   const monthStart = startOfMonth(month);
   const days = eachDayOfInterval({ start: monthStart, end: endOfMonth(month) });
@@ -136,13 +137,13 @@ export default function CareCalendar({
             {format(selectedDay, 'EEEE, MMM d')}
           </div>
           {on('water', selectedDay).map(e => (
-            <DayEntry key={`w-${e.id}`} color={WATER} icon="💧" text={`${e.by || 'Someone'} watered`} date={e.date} />
+            <DayEntry key={`w-${e.id}`} onClick={() => onEntryTap?.(e, 'water')} color={WATER} icon="💧" text={`${e.by || 'Someone'} watered`} date={e.date} />
           ))}
           {on('fertilizer', selectedDay).map(e => (
-            <DayEntry key={`f-${e.id}`} color={FERT} icon="🌿" text={`${e.by || 'Someone'} fertilized`} date={e.date} />
+            <DayEntry key={`f-${e.id}`} onClick={() => onEntryTap?.(e, 'feed')} color={FERT} icon="🌿" text={`${e.by || 'Someone'} fertilized`} date={e.date} />
           ))}
           {on('check', selectedDay).map(e => (
-            <DayEntry key={`c-${e.id}`} color={OLIVE} icon="✓" text={`${e.by || 'Someone'} checked`} date={e.date} />
+            <DayEntry key={`c-${e.id}`} onClick={() => onEntryTap?.(e, 'check')} color={OLIVE} icon="✓" text={`${e.by || 'Someone'} checked`} date={e.date} />
           ))}
         </div>
       )}
@@ -150,9 +151,9 @@ export default function CareCalendar({
   );
 }
 
-function DayEntry({ color, icon, text, date }) {
+function DayEntry({ color, icon, text, date, onClick }) {
   return (
-    <div style={{
+    <div role="button" tabIndex={0} onClick={onClick} onKeyDown={e => { if (e.key === 'Enter') onClick?.(); }} style={{ cursor: 'pointer', minHeight: '44px', alignItems: 'center', boxSizing: 'border-box',
       marginBottom: '6px', padding: '10px', background: '#0f1f0f',
       borderRadius: '10px', fontSize: '13px', color,
       display: 'flex', justifyContent: 'space-between', gap: '8px',

@@ -1,0 +1,29 @@
+{
+  "indexes": [
+    {
+      "collectionGroup": "wateringLogs",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "householdId", "order": "ASCENDING" },
+        { "fieldPath": "wateredAt", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "checkLogs",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "householdId", "order": "ASCENDING" },
+        { "fieldPath": "checkedAt", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "fertilizerLogs",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "householdId", "order": "ASCENDING" },
+        { "fieldPath": "fertilizedAt", "order": "ASCENDING" }
+      ]
+    }
+  ],
+  "fieldOverrides": []
+}

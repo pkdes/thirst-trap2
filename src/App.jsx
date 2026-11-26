@@ -3,6 +3,7 @@ import { useAuth } from './hooks/useAuth';
 import LoginScreen from './screens/LoginScreen';
 import HouseholdSetupScreen from './screens/HouseholdSetupScreen';
 import HomeScreen from './screens/HomeScreen';
+import CalendarScreen from './screens/CalendarScreen';
 import FamiliesScreen from './screens/FamiliesScreen';
 import PlantDetailScreen from './screens/PlantDetailScreen';
 import BottomNav from './components/BottomNav';
@@ -51,6 +52,12 @@ export default function App() {
     <>
       {tab === 'plants' ? (
         <HomeScreen
+          user={user}
+          household={household}
+          onSelectPlant={setSelectedPlant}
+        />
+      ) : tab === 'calendar' ? (
+        <CalendarScreen
           user={user}
           household={household}
           onSelectPlant={setSelectedPlant}

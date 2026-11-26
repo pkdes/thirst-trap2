@@ -1,5 +1,6 @@
 const TABS = [
   { key: 'plants', icon: '🌿', label: 'My Plants' },
+  { key: 'calendar', icon: '📅', label: 'Calendar' },
   { key: 'families', icon: '🌳', label: 'Families' },
 ];
 

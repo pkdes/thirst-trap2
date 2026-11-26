@@ -1,11 +1,14 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { collection, query, where, onSnapshot, doc, updateDoc, Timestamp } from 'firebase/firestore';
 import { db } from '../lib/firebase';
-import { logCare } from '../lib/logging';
+import { logCare, undoCare, CARE_KINDS } from '../lib/logging';
 import { format, isSameDay, isAfter, startOfDay, isToday } from 'date-fns';
 import { toDate, startOfLocalDay, wateringStatus, fertilizerStatus, CARE_COLORS } from '../lib/dates';
 import { useBackGuard } from '../hooks/useBackGuard';
 import CareCalendar from './CareCalendar';
+import EditLogSheet from './EditLogSheet';
+import UndoToast from './UndoToast';
+import { KIND_COLOR } from '../lib/calendarDays';
 
 const WATER = CARE_COLORS.water;
 const FERT = CARE_COLORS.fertilizer;
@@ -23,6 +26,9 @@ export default function CareTab({ plant, user, household, onPlantUpdate }) {
   const [calendarMonth, setCalendarMonth] = useState(new Date());
   const [waterInterval, setWaterInterval] = useState(plant.waterIntervalDays ?? '');
   const [fertInterval, setFertInterval] = useState(plant.fertilizerIntervalDays ?? '');
+  const [editing, setEditing] = useState(null);
+  const [toast, setToast] = useState(null);
+  const dismissToast = useCallback(() => setToast(null), []);
 
   useBackGuard(showCheckPopup, () => setShowCheckPopup(false));
   useBackGuard(!!confirmDouble, () => setConfirmDouble(null));
@@ -133,6 +139,10 @@ export default function CareTab({ plant, user, household, onPlantUpdate }) {
     onPlantUpdate({ ...plant, [field]: value });
   }
 
+  function openEditor(entry, kind) {
+    setEditing({ ...entry.log, kind, plantName: plant.name });
+  }
+
   function handleDayTap(day) {
     if (isAfter(startOfDay(day), startOfDay(new Date()))) return;
     const hasEntries =
@@ -141,6 +151,17 @@ export default function CareTab({ plant, user, household, onPlantUpdate }) {
       entries.check.some(e => isSameDay(e.date, day));
 
     if (hasEntries) {
+      const dayEntries = [
+        ...entries.water.map(e => ({ ...e, kind: 'water' })),
+        ...entries.fertilizer.map(e => ({ ...e, kind: 'feed' })),
+        ...entries.check.map(e => ({ ...e, kind: 'check' })),
+      ].filter(e => isSameDay(e.date, day));
+      setTargetDate(null);
+      if (dayEntries.length === 1) {
+        setSelectedDay(null);
+        openEditor(dayEntries[0], dayEntries[0].kind);
+        return;
+      }
       setSelectedDay(prev => (prev && isSameDay(prev, day) ? null : day));
       setTargetDate(null);
     } else if (isToday(day)) {
@@ -157,6 +178,12 @@ export default function CareTab({ plant, user, household, onPlantUpdate }) {
     fertilizer: toEntries(fertLogs, 'fertilizedAt'),
     check: toEntries(checkLogs, 'checkedAt'),
   };
+
+  const history = [
+    ...entries.water.map(e => ({ ...e, kind: 'water' })),
+    ...entries.fertilizer.map(e => ({ ...e, kind: 'feed' })),
+    ...entries.check.map(e => ({ ...e, kind: 'check' })),
+  ].sort((a, b) => b.date - a.date).slice(0, 20);
 
   const projectedWater = projectedDue(lastWateredTs, plant.waterIntervalDays, plant.nextWateringOverride, water.checkedAfterWatering);
   const projectedFert = projectedDue(lastFertTs, plant.fertilizerIntervalDays);
@@ -270,6 +297,46 @@ export default function CareTab({ plant, user, household, onPlantUpdate }) {
         selectedDay={selectedDay}
         targetDate={targetDate}
         onDayTap={handleDayTap}
+        onEntryTap={openEditor}
+      />
+
+      <h3 style={{ color: '#a8c5a0', fontSize: '14px', fontWeight: '600', margin: '24px 0 8px' }}>History</h3>
+      {history.length === 0 && <p style={{ color: '#6a8f6a', fontSize: '13px', margin: 0 }}>No care logged yet.</p>}
+      {history.map(e => (
+        <button
+          key={`${e.kind}-${e.id}`}
+          type="button"
+          onClick={() => openEditor(e, e.kind)}
+          style={{
+            display: 'flex', alignItems: 'center', gap: '10px', width: '100%', minHeight: '44px',
+            boxSizing: 'border-box', background: '#1a2e1a', border: '1px solid #2d4a2d', borderRadius: '10px',
+            padding: '8px 12px', marginBottom: '6px', cursor: 'pointer', color: '#fff', textAlign: 'left', fontSize: '14px',
+          }}
+        >
+          <span style={{ width: 8, height: 8, borderRadius: '50%', background: KIND_COLOR[e.kind], flexShrink: 0 }} />
+          <span style={{ flex: 1, minWidth: 0 }}>{CARE_KINDS[e.kind].label}</span>
+          <span style={{ color: '#a8c5a0', fontSize: '12px' }}>{format(e.date, 'MMM d, yyyy')}</span>
+          <span style={{ color: '#6a8f6a', fontSize: '12px', maxWidth: '80px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{e.by || 'Someone'}</span>
+        </button>
+      ))}
+
+      {editing && (
+        <EditLogSheet
+          log={editing}
+          user={user}
+          household={household}
+          onClose={() => setEditing(null)}
+          onDeleted={t => setToast({ id: Date.now(), ...t })}
+        />
+      )}
+      <UndoToast
+        toast={toast}
+        bottom={12}
+        onDismiss={dismissToast}
+        onUndo={async t => {
+          setToast(null);
+          try { await (t.undo ? t.undo() : undoCare(t.token)); } catch (err) { console.error('Undo failed', err); }
+        }}
       />
 
       {showCheckPopup && (
@@ -324,7 +391,7 @@ function useSubscription(collectionName, dateField, plantId, householdId, setter
 
 function toEntries(logs, dateField) {
   return logs
-    .map(l => ({ id: l.id, date: toDate(l[dateField]), by: l.loggedBy?.displayName }))
+    .map(l => ({ id: l.id, log: l, date: toDate(l[dateField]), by: l.loggedBy?.displayName }))
     .filter(e => e.date);
 }
 

@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
-import { collection, query, where, onSnapshot, addDoc, serverTimestamp } from 'firebase/firestore';
-import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
+import { collection, query, where, onSnapshot, addDoc, deleteDoc, doc, serverTimestamp } from 'firebase/firestore';
+import { ref, uploadBytes, getDownloadURL, deleteObject } from 'firebase/storage';
 import { db, storage } from '../lib/firebase';
 import { analyzePlantHealth } from '../lib/anthropic';
 import { format } from 'date-fns';
@@ -34,6 +34,25 @@ export default function HealthTab({ plant, user, household }) {
     if (!file) return;
     setPhotoFile(file);
     setPhotoPreview(URL.createObjectURL(file));
+  }
+
+  // The doc only stores the download URL, and ref() accepts those, so the
+  // storage path doesn't need to be kept separately.
+  async function deleteLog(log) {
+    try {
+      await deleteDoc(doc(db, 'healthLogs', log.id));
+    } catch (err) {
+      console.error('Health log delete failed', err);
+      setError("Couldn't delete that health check.");
+      return;
+    }
+    if (log.photoUrl) {
+      try {
+        await deleteObject(ref(storage, log.photoUrl));
+      } catch (err) {
+        if (err?.code !== 'storage/object-not-found') console.error('Health photo delete failed', err);
+      }
+    }
   }
 
   async function handleSubmit() {
@@ -159,7 +178,7 @@ export default function HealthTab({ plant, user, household }) {
       )}
 
       {logs.map(log => (
-        <HealthCard key={log.id} log={log} />
+        <HealthCard key={log.id} log={log} onDelete={() => deleteLog(log)} />
       ))}
 
       {logs.length === 0 && !pendingEntry && !showForm && (
@@ -172,7 +191,8 @@ export default function HealthTab({ plant, user, household }) {
   );
 }
 
-function HealthCard({ log, pending }) {
+function HealthCard({ log, pending, onDelete }) {
+  const [confirming, setConfirming] = useState(false);
   return (
     <div style={{
       background: '#1a2e1a', borderRadius: '14px', padding: '16px',
@@ -205,6 +225,19 @@ function HealthCard({ log, pending }) {
           <div style={{ fontSize: '12px', color: '#6a8f6a' }}>
             {log.createdBy?.displayName} · {log.createdAt?.toDate ? format(log.createdAt.toDate(), 'MMM d, yyyy') : ''}
           </div>
+          {onDelete && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginTop: '8px', justifyContent: 'flex-end' }}>
+              {confirming ? (
+                <>
+                  <span style={{ color: '#f08a6a', fontSize: '13px' }}>Delete this check?</span>
+                  <button onClick={onDelete} style={{ minHeight: '44px', padding: '0 14px', borderRadius: '10px', background: '#c9573a', color: '#fff', border: 'none', fontWeight: '700', cursor: 'pointer' }}>Yes</button>
+                  <button onClick={() => setConfirming(false)} style={{ minHeight: '44px', padding: '0 14px', borderRadius: '10px', background: 'transparent', color: '#a8c5a0', border: '1px solid #2d4a2d', cursor: 'pointer' }}>Cancel</button>
+                </>
+              ) : (
+                <button onClick={() => setConfirming(true)} aria-label="Delete health check" style={{ minHeight: '44px', padding: '0 14px', borderRadius: '10px', background: 'transparent', color: '#f08a6a', border: '1px solid #f08a6a', fontSize: '13px', cursor: 'pointer' }}>Delete</button>
+              )}
+            </div>
+          )}
         </>
       )}
     </div>

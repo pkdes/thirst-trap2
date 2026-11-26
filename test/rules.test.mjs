@@ -122,6 +122,15 @@ await check('stranger CANNOT edit amy\'s log', () =>
 await check('amy can delete her household\'s log', () =>
   assertSucceeds(deleteDoc(doc(amy, 'wateringLogs/logEdit'))));
 
+console.log('\n--- calendar month query ---');
+await check('amy can query a month of her household\'s watering logs', () =>
+  assertSucceeds(getDocs(query(collection(amy, 'wateringLogs'), where('householdId', '==', HOUSE_A),
+    where('wateredAt', '>=', Timestamp.fromDate(new Date(2026, 10, 1))),
+    where('wateredAt', '<', Timestamp.fromDate(new Date(2026, 11, 1)))))));
+await check('stranger CANNOT run that query on amy\'s household', () =>
+  assertFails(getDocs(query(collection(stranger, 'wateringLogs'), where('householdId', '==', HOUSE_A),
+    where('wateredAt', '>=', Timestamp.fromDate(new Date(2026, 10, 1)))))));
+
 console.log(`\n${pass} passed, ${fail} failed\n`);
 await env.cleanup();
 process.exit(fail ? 1 : 0);
