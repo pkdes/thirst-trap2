@@ -3,6 +3,8 @@ import { wateringStatus, CARE_COLORS, todayISO } from '../lib/dates';
 import { archiveReasonLabel } from '../lib/archive';
 import { useLongPress } from '../hooks/useLongPress';
 import { useBackGuard } from '../hooks/useBackGuard';
+import { useDoctor } from '../hooks/useDoctor';
+import DoctorCard from './DoctorCard';
 
 const BTN = 44;
 
@@ -10,8 +12,9 @@ const BTN = 44;
  * One row per plant: thumbnail, name, room, due chip and a one-tap 💧 button.
  * `onLog(plant, kind, date)` does the logging; kind is 'water' | 'check' | 'feed'.
  */
-export default function PlantList({ plants, multiSelect, selected, onOpen, onToggle, onEnterSelect, onLog }) {
+export default function PlantList({ plants, householdId, multiSelect, selected, onOpen, onToggle, onEnterSelect, onLog }) {
   const [menuPlant, setMenuPlant] = useState(null);
+  const { suggestions, hide } = useDoctor(householdId, plants);
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', padding: '12px 16px 0' }}>
@@ -19,6 +22,8 @@ export default function PlantList({ plants, multiSelect, selected, onOpen, onTog
         <PlantRow
           key={plant.id}
           plant={plant}
+          suggestion={suggestions[plant.id]}
+          onDoctorResolved={() => hide(plant.id)}
           multiSelect={multiSelect}
           isSelected={selected.has(plant.id)}
           onClick={() => (multiSelect ? onToggle(plant.id) : onOpen(plant))}
@@ -38,11 +43,13 @@ export default function PlantList({ plants, multiSelect, selected, onOpen, onTog
   );
 }
 
-function PlantRow({ plant, multiSelect, isSelected, onClick, onLongPress, onWater, onMenu }) {
+function PlantRow({ plant, suggestion, onDoctorResolved, multiSelect, isSelected, onClick, onLongPress, onWater, onMenu }) {
   const { handlers, consumeClick } = useLongPress(onLongPress);
   const status = wateringStatus(plant, plant.lastWateredAt, plant.lastCheckedAt);
   const needsAttention = !plant.archived && (status.state === 'late' || status.state === 'never');
   const border = plant.archived ? '#4a4020' : isSelected ? '#4caf50' : needsAttention ? CARE_COLORS.late : '#2d4a2d';
+
+  const [doctorOpen, setDoctorOpen] = useState(false);
 
   const activate = () => { if (!consumeClick()) onClick(); };
 
@@ -56,7 +63,7 @@ function PlantRow({ plant, multiSelect, isSelected, onClick, onLongPress, onWate
       onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onClick(); } }}
       {...handlers}
       style={{
-        display: 'flex', alignItems: 'center', gap: '12px', minHeight: '64px', boxSizing: 'border-box',
+        display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '12px', minHeight: '64px', boxSizing: 'border-box',
         background: '#1a2e1a', borderRadius: '14px', padding: '10px 10px 10px 12px', cursor: 'pointer',
         border: `1px solid ${border}`,
         boxShadow: isSelected ? '0 0 0 2px #4caf50' : 'none',
@@ -95,6 +102,26 @@ function PlantRow({ plant, multiSelect, isSelected, onClick, onLongPress, onWate
             </span>
           )}
         </div>
+        {suggestion && !multiSelect && (
+          <button
+            type="button"
+            aria-expanded={doctorOpen}
+            onPointerDown={e => e.stopPropagation()}
+            onClick={e => { e.stopPropagation(); setDoctorOpen(o => !o); }}
+            onKeyDown={e => e.stopPropagation()}
+            style={{
+              display: 'inline-flex', alignItems: 'center', minHeight: '44px', marginTop: '2px', padding: 0,
+              background: 'none', border: 'none', cursor: 'pointer', touchAction: 'manipulation', maxWidth: '100%',
+            }}
+          >
+            <span style={{
+              ...chip, background: '#3a3018', color: '#e0a060', border: '1px solid #8a7030',
+              overflow: 'hidden', textOverflow: 'ellipsis',
+            }}>
+              🩺 {suggestion.chip}
+            </span>
+          </button>
+        )}
       </div>
 
       {multiSelect ? (
@@ -108,6 +135,10 @@ function PlantRow({ plant, multiSelect, isSelected, onClick, onLongPress, onWate
         </div>
       ) : !plant.archived && (
         <WaterButton plant={plant} onWater={onWater} onMenu={onMenu} />
+      )}
+
+      {suggestion && doctorOpen && !multiSelect && (
+        <DoctorCard plant={plant} suggestion={suggestion} onResolved={onDoctorResolved} />
       )}
     </div>
   );

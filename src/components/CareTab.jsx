@@ -8,6 +8,8 @@ import { useBackGuard } from '../hooks/useBackGuard';
 import CareCalendar from './CareCalendar';
 import EditLogSheet from './EditLogSheet';
 import UndoToast from './UndoToast';
+import DoctorCard from './DoctorCard';
+import { suggest } from '../lib/doctor';
 import { KIND_COLOR } from '../lib/calendarDays';
 
 const WATER = CARE_COLORS.water;
@@ -27,6 +29,7 @@ export default function CareTab({ plant, user, household, onPlantUpdate }) {
   const [waterInterval, setWaterInterval] = useState(plant.waterIntervalDays ?? '');
   const [fertInterval, setFertInterval] = useState(plant.fertilizerIntervalDays ?? '');
   const [editing, setEditing] = useState(null);
+  const [doctorDone, setDoctorDone] = useState(false);
   const [toast, setToast] = useState(null);
   const dismissToast = useCallback(() => setToast(null), []);
 
@@ -185,6 +188,13 @@ export default function CareTab({ plant, user, household, onPlantUpdate }) {
     ...entries.check.map(e => ({ ...e, kind: 'check' })),
   ].sort((a, b) => b.date - a.date).slice(0, 20);
 
+  const doctorSuggestion = doctorDone
+    ? null
+    : suggest(plant, {
+        waterLogs: waterLogs.map(l => toDate(l.wateredAt)).filter(Boolean),
+        checkLogs: checkLogs.map(l => toDate(l.checkedAt)).filter(Boolean),
+      });
+
   const projectedWater = projectedDue(lastWateredTs, plant.waterIntervalDays, plant.nextWateringOverride, water.checkedAfterWatering);
   const projectedFert = projectedDue(lastFertTs, plant.fertilizerIntervalDays);
 
@@ -206,6 +216,20 @@ export default function CareTab({ plant, user, household, onPlantUpdate }) {
           accent={FERT}
         />
       </div>
+
+      {doctorSuggestion && (
+        <div style={{ marginBottom: '16px' }}>
+          <DoctorCard
+            plant={plant}
+            suggestion={doctorSuggestion}
+            onResolved={patch => {
+              setDoctorDone(true);
+              if (patch.waterIntervalDays) setWaterInterval(patch.waterIntervalDays);
+              onPlantUpdate({ ...plant, ...patch, doctorDismissedAt: Timestamp.now() });
+            }}
+          />
+        </div>
+      )}
 
       {targetDate && (
         <div style={{

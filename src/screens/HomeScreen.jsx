@@ -307,6 +307,7 @@ export default function HomeScreen({ user, household, onSelectPlant }) {
       {view === 'list' ? (
         <PlantList
           plants={displayPlants}
+          householdId={household.id}
           multiSelect={multiSelect}
           selected={selected}
           onOpen={onSelectPlant}
