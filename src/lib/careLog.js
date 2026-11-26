@@ -93,8 +93,12 @@ export async function logCare(db, { plants, kind, date = null, household, user, 
     batch.update(doc(db, 'plants', plant.id), update);
   }
 
-  await batch.commit();
-  return { kind, logIds, prior, householdId: household.id };
+  // Don't wait for the server: Firestore applies the write locally at once (the
+  // listeners update immediately), so the Undo toast works with no signal in the
+  // garden. Callers that need confirmation can await token.committed.
+  const committed = batch.commit();
+  committed.catch(err => console.error('Care log failed to sync', err));
+  return { kind, logIds, prior, householdId: household.id, committed };
 }
 
 /** Newest timestamp among a plant's logs of one kind, ignoring `excludeIds`. */

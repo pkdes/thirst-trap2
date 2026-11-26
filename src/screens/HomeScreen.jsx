@@ -1,17 +1,34 @@
-import { useState, useEffect, useRef } from 'react';
-import { collection, query, where, onSnapshot, writeBatch, doc, deleteField, Timestamp } from 'firebase/firestore';
+import { useState, useEffect, useCallback } from 'react';
+import { collection, query, where, onSnapshot } from 'firebase/firestore';
 import { signOut } from 'firebase/auth';
 import { db, auth } from '../lib/firebase';
 import AddPlantModal from '../components/AddPlantModal';
 import HouseholdModal from '../components/HouseholdModal';
 import ThirstQuencher from '../components/ThirstQuencher';
 import NotificationSettings from '../components/NotificationSettings';
-import { wateringStatus, thirstScore, CARE_COLORS } from '../lib/dates';
-import { archiveReasonLabel } from '../lib/archive';
+import PlantList from '../components/PlantList';
+import PlantTile from '../components/PlantTile';
+import UndoToast from '../components/UndoToast';
+import { thirstScore, todayISO, CARE_COLORS } from '../lib/dates';
+import { logCare, undoCare, CARE_KINDS } from '../lib/logging';
+import { vibrate } from '../lib/sounds';
+import { format } from 'date-fns';
 import { useBackGuard } from '../hooks/useBackGuard';
 
 const OLIVE = CARE_COLORS.check;
 const NAV_HEIGHT = 64;
+
+const storage = {
+  get(store, key) { try { return window[store].getItem(key); } catch { return null; } },
+  set(store, key, value) { try { window[store].setItem(key, value); } catch { /* storage unavailable */ } },
+};
+
+function readRooms(householdId) {
+  try {
+    const arr = JSON.parse(storage.get('sessionStorage', `tt:rooms:${householdId}`) || '[]');
+    return new Set(Array.isArray(arr) ? arr.filter(r => typeof r === 'string') : []);
+  } catch { return new Set(); }
+}
 
 const SORT_OPTIONS = [
   { key: 'thirstiest', label: '💧 Thirstiest' },
@@ -23,10 +40,10 @@ export default function HomeScreen({ user, household, onSelectPlant }) {
   const [plants, setPlants] = useState([]);
   const [search, setSearch] = useState('');
   const [showAdd, setShowAdd] = useState(false);
-  const [lastWatered, setLastWatered] = useState({});
-  const [lastChecked, setLastChecked] = useState({});
   const [sort, setSort] = useState('thirstiest');
-  const [locationFilter, setLocationFilter] = useState(null);
+  const [roomFilter, setRoomFilter] = useState(() => readRooms(household.id));
+  const [view, setView] = useState(() => (storage.get('localStorage', `tt:view:${household.id}`) === 'grid' ? 'grid' : 'list'));
+  const [toast, setToast] = useState(null);
   const [showArchived, setShowArchived] = useState(false);
   const [showHousehold, setShowHousehold] = useState(false);
   const [showQuencher, setShowQuencher] = useState(false);
@@ -53,37 +70,47 @@ export default function HomeScreen({ user, household, onSelectPlant }) {
     });
   }, [household]);
 
-  useEffect(() => {
-    if (!household) return;
-    const q = query(collection(db, 'wateringLogs'), where('householdId', '==', household.id));
-    return onSnapshot(q, snap => {
-      const map = {};
-      snap.docs.forEach(d => {
-        const { plantId, wateredAt } = d.data();
-        const seconds = wateredAt?.seconds ?? 0;
-        if (!map[plantId] || seconds > (map[plantId]?.seconds ?? 0)) map[plantId] = wateredAt;
-      });
-      setLastWatered(map);
-    });
-  }, [household]);
-
-  useEffect(() => {
-    if (!household) return;
-    const q = query(collection(db, 'checkLogs'), where('householdId', '==', household.id));
-    return onSnapshot(q, snap => {
-      const map = {};
-      snap.docs.forEach(d => {
-        const { plantId, checkedAt } = d.data();
-        const seconds = checkedAt?.seconds ?? 0;
-        if (!map[plantId] || seconds > (map[plantId]?.seconds ?? 0)) map[plantId] = checkedAt;
-      });
-      setLastChecked(map);
-    });
-  }, [household]);
-
   const activePlants = plants.filter(p => !p.archived);
   const archivedPlants = plants.filter(p => p.archived);
   const locations = [...new Set(activePlants.map(p => p.location).filter(Boolean))].sort();
+  // Only rooms that still exist count; an empty selection means every room
+  const activeRooms = locations.length > 1 ? locations.filter(l => roomFilter.has(l)) : [];
+
+  function chooseView(next) {
+    setView(next);
+    storage.set('localStorage', `tt:view:${household.id}`, next);
+  }
+
+  function updateRooms(next) {
+    setRoomFilter(next);
+    storage.set('sessionStorage', `tt:rooms:${household.id}`, JSON.stringify([...next]));
+  }
+
+  function toggleRoom(loc) {
+    const next = new Set(roomFilter);
+    next.has(loc) ? next.delete(loc) : next.add(loc);
+    updateRooms(next);
+  }
+
+  const dismissToast = useCallback(() => setToast(null), []);
+
+  async function careLog(plant, kind, date = null) {
+    const id = Date.now();
+    try {
+      const token = await logCare({ plants: [plant], kind, date, household, user });
+      if (kind === 'water') vibrate(30);
+      const when = date ? ` · ${format(date, 'MMM d')}` : '';
+      setToast({ id, message: `${CARE_KINDS[kind].label} ${plant.name}${when}`, token });
+    } catch (err) {
+      console.error('Care log failed', err);
+      setToast({ id, message: `Couldn't log ${plant.name}` });
+    }
+  }
+
+  async function undoToast(t) {
+    setToast(null);
+    try { await undoCare(t.token); } catch (err) { console.error('Undo failed', err); }
+  }
 
   function sortedPlants() {
     const pool = showArchived ? archivedPlants : activePlants;
@@ -91,7 +118,7 @@ export default function HomeScreen({ user, household, onSelectPlant }) {
     let filtered = pool.filter(p =>
       p.name.toLowerCase().includes(term) || p.location?.toLowerCase().includes(term)
     );
-    if (locationFilter && !showArchived) filtered = filtered.filter(p => p.location === locationFilter);
+    if (activeRooms.length && !showArchived) filtered = filtered.filter(p => activeRooms.includes(p.location));
     if (showArchived) {
       return [...filtered].sort((a, b) => (b.archivedAt?.seconds ?? 0) - (a.archivedAt?.seconds ?? 0));
     }
@@ -99,8 +126,8 @@ export default function HomeScreen({ user, household, onSelectPlant }) {
     if (sort === 'recent') return filtered;
     return [...filtered].sort(
       (a, b) =>
-        thirstScore(b, lastWatered[b.id], lastChecked[b.id]) -
-        thirstScore(a, lastWatered[a.id], lastChecked[a.id])
+        thirstScore(b, b.lastWateredAt, b.lastCheckedAt) -
+        thirstScore(a, a.lastWateredAt, a.lastCheckedAt)
     );
   }
 
@@ -126,7 +153,7 @@ export default function HomeScreen({ user, household, onSelectPlant }) {
   function initiateBatch(type) {
     if (!selected.size) return;
     setPendingBatchType(type);
-    setBatchDate(new Date().toISOString().split('T')[0]);
+    setBatchDate(todayISO());
     setShowBatchDatePicker(true);
   }
 
@@ -134,28 +161,20 @@ export default function HomeScreen({ user, household, onSelectPlant }) {
     if (!pendingBatchType || !batchDate || batching) return;
     setBatching(true);
     const [year, month, day] = batchDate.split('-').map(Number);
-    const loggedAt = Timestamp.fromDate(new Date(year, month - 1, day, 12, 0, 0));
-    const displayName = user.displayName?.split(' ')[0] || 'Someone';
-    const batch = writeBatch(db);
-
-    selected.forEach(plantId => {
-      if (pendingBatchType === 'water') {
-        const logRef = doc(collection(db, 'wateringLogs'));
-        batch.set(logRef, { plantId, householdId: household.id, wateredAt: loggedAt, loggedBy: { userId: user.uid, displayName } });
-        batch.update(doc(db, 'plants', plantId), { nextWateringOverride: deleteField() });
-      } else if (pendingBatchType === 'check') {
-        const logRef = doc(collection(db, 'checkLogs'));
-        batch.set(logRef, { plantId, householdId: household.id, checkedAt: loggedAt, loggedBy: { userId: user.uid, displayName } });
-      } else if (pendingBatchType === 'fertilize') {
-        const logRef = doc(collection(db, 'fertilizerLogs'));
-        batch.set(logRef, { plantId, householdId: household.id, fertilizedAt: loggedAt, loggedBy: { userId: user.uid, displayName } });
-      }
-    });
-
-    await batch.commit();
+    try {
+      await logCare({
+        plants: plants.filter(p => selected.has(p.id)),
+        kind: pendingBatchType === 'fertilize' ? 'feed' : pendingBatchType,
+        date: new Date(year, month - 1, day),
+        household,
+        user,
+      });
+      setShowBatchDatePicker(false);
+      exitMultiSelect();
+    } catch (err) {
+      console.error('Batch log failed', err);
+    }
     setBatching(false);
-    setShowBatchDatePicker(false);
-    exitMultiSelect();
   }
 
   const displayPlants = sortedPlants();
@@ -202,16 +221,21 @@ export default function HomeScreen({ user, household, onSelectPlant }) {
 
         {!multiSelect && (
           <>
-            <input
-              value={search}
-              onChange={e => setSearch(e.target.value)}
-              placeholder="Search by name or location..."
-              style={{
-                width: '100%', background: '#1e331e', border: '1px solid #2d4a2d',
-                borderRadius: '10px', padding: '10px 14px', color: '#fff', fontSize: '15px',
-                outline: 'none', boxSizing: 'border-box', marginBottom: '10px',
-              }}
-            />
+            <div style={{ display: 'flex', gap: '8px', marginBottom: '10px', alignItems: 'center' }}>
+              <input
+                value={search}
+                onChange={e => setSearch(e.target.value)}
+                placeholder="Search by name or location..."
+                aria-label="Search plants"
+                style={{
+                  flex: 1, minWidth: 0, background: '#1e331e', border: '1px solid #2d4a2d',
+                  borderRadius: '10px', padding: '0 14px', height: '44px', color: '#fff', fontSize: '15px',
+                  outline: 'none', boxSizing: 'border-box',
+                }}
+              />
+              <ViewButton label="List view" active={view === 'list'} onClick={() => chooseView('list')}>☰</ViewButton>
+              <ViewButton label="Grid view" active={view === 'grid'} onClick={() => chooseView('grid')}>▦</ViewButton>
+            </div>
             <div className="no-scrollbar" style={{ display: 'flex', gap: '6px', overflowX: 'auto', paddingBottom: '2px', alignItems: 'center' }}>
               {!showArchived && (
                 <>
@@ -239,17 +263,17 @@ export default function HomeScreen({ user, household, onSelectPlant }) {
             {locations.length > 1 && !showArchived && (
               <div className="no-scrollbar" style={{ display: 'flex', gap: '6px', overflowX: 'auto', paddingBottom: '2px', marginTop: '6px' }}>
                 <span style={{ color: '#6a8f6a', fontSize: '12px', flexShrink: 0, alignSelf: 'center' }}>📍</span>
-                <Chip active={!locationFilter} activeBg="#2d4a1e" activeColor="#a8e080" activeBorder="#4caf50" onClick={() => setLocationFilter(null)}>
+                <Chip active={!activeRooms.length} activeBg="#2d4a1e" activeColor="#a8e080" activeBorder="#4caf50" onClick={() => updateRooms(new Set())}>
                   All
                 </Chip>
                 {locations.map(loc => (
                   <Chip
                     key={loc}
-                    active={locationFilter === loc}
+                    active={roomFilter.has(loc)}
                     activeBg="#2d4a1e"
                     activeColor="#a8e080"
                     activeBorder="#4caf50"
-                    onClick={() => setLocationFilter(f => (f === loc ? null : loc))}
+                    onClick={() => toggleRoom(loc)}
                   >
                     {loc}
                   </Chip>
@@ -280,20 +304,30 @@ export default function HomeScreen({ user, household, onSelectPlant }) {
         </div>
       )}
 
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px', padding: '12px 16px 0' }}>
-        {displayPlants.map(plant => (
-          <PlantTile
-            key={plant.id}
-            plant={plant}
-            lastWateredTs={lastWatered[plant.id]}
-            lastCheckedTs={lastChecked[plant.id]}
-            multiSelect={multiSelect}
-            isSelected={selected.has(plant.id)}
-            onLongPress={() => enterMultiSelect(plant.id)}
-            onClick={() => (multiSelect ? toggleSelect(plant.id) : onSelectPlant(plant))}
-          />
-        ))}
-      </div>
+      {view === 'list' ? (
+        <PlantList
+          plants={displayPlants}
+          multiSelect={multiSelect}
+          selected={selected}
+          onOpen={onSelectPlant}
+          onToggle={toggleSelect}
+          onEnterSelect={enterMultiSelect}
+          onLog={careLog}
+        />
+      ) : (
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px', padding: '12px 16px 0' }}>
+          {displayPlants.map(plant => (
+            <PlantTile
+              key={plant.id}
+              plant={plant}
+              multiSelect={multiSelect}
+              isSelected={selected.has(plant.id)}
+              onLongPress={() => enterMultiSelect(plant.id)}
+              onClick={() => (multiSelect ? toggleSelect(plant.id) : onSelectPlant(plant))}
+            />
+          ))}
+        </div>
+      )}
 
       {!multiSelect && !showArchived && (
         <>
@@ -379,7 +413,7 @@ export default function HomeScreen({ user, household, onSelectPlant }) {
             <input
               type="date"
               value={batchDate}
-              max={new Date().toISOString().split('T')[0]}
+              max={todayISO()}
               onChange={e => setBatchDate(e.target.value)}
               style={{
                 width: '100%', background: '#0f1f0f', border: '1px solid #2d4a2d',
@@ -411,14 +445,13 @@ export default function HomeScreen({ user, household, onSelectPlant }) {
         </div>
       )}
 
+      {!multiSelect && <UndoToast toast={toast} onUndo={undoToast} onDismiss={dismissToast} />}
       {showNotifSettings && <NotificationSettings user={user} onClose={() => setShowNotifSettings(false)} />}
       {showAdd && <AddPlantModal user={user} household={household} onClose={() => setShowAdd(false)} />}
       {showHousehold && <HouseholdModal household={household} onClose={() => setShowHousehold(false)} />}
       {showQuencher && (
         <ThirstQuencher
           plants={activePlants}
-          lastWatered={lastWatered}
-          lastChecked={lastChecked}
           user={user}
           household={household}
           onClose={() => setShowQuencher(false)}
@@ -446,88 +479,23 @@ function Chip({ active, onClick, children, activeBg = '#4caf50', activeColor = '
   );
 }
 
-function PlantTile({ plant, lastWateredTs, lastCheckedTs, multiSelect, isSelected, onLongPress, onClick }) {
-  const pressTimer = useRef(null);
-
-  function startPress() { pressTimer.current = setTimeout(() => onLongPress(), 600); }
-  function cancelPress() { if (pressTimer.current) { clearTimeout(pressTimer.current); pressTimer.current = null; } }
-
-  const status = wateringStatus(plant, lastWateredTs, lastCheckedTs);
-  const needsAttention = !plant.archived && (status.state === 'late' || status.state === 'never');
-
-  const borderColor = plant.archived
-    ? '#4a4020'
-    : isSelected
-      ? '#4caf50'
-      : needsAttention
-        ? CARE_COLORS.late
-        : '#2d4a2d';
-
+function ViewButton({ label, active, onClick, children }) {
   return (
-    <div
+    <button
+      type="button"
+      aria-label={label}
+      aria-pressed={active}
       onClick={onClick}
-      onMouseDown={startPress}
-      onMouseUp={cancelPress}
-      onMouseLeave={cancelPress}
-      onTouchStart={startPress}
-      onTouchEnd={cancelPress}
-      onTouchMove={cancelPress}
       style={{
-        background: '#1a2e1a', borderRadius: '16px', overflow: 'hidden', cursor: 'pointer',
-        border: `1px solid ${borderColor}`,
-        boxShadow: isSelected ? '0 0 0 2px #4caf50' : needsAttention ? `0 0 0 1px ${CARE_COLORS.late}44` : 'none',
-        transition: 'box-shadow 0.15s',
-        userSelect: 'none',
+        width: '44px', height: '44px', flexShrink: 0, borderRadius: '10px', cursor: 'pointer',
+        fontSize: '18px', lineHeight: 1, padding: 0,
+        background: active ? '#2d4a1e' : '#1e331e',
+        color: active ? '#a8e080' : '#a8c5a0',
+        border: `1px solid ${active ? '#4caf50' : '#2d4a2d'}`,
       }}
     >
-      <div style={{ aspectRatio: '1', overflow: 'hidden', background: '#2d4a2d', position: 'relative' }}>
-        {plant.photoUrl ? (
-          <img
-            src={plant.photoUrl}
-            alt={plant.name}
-            style={{ width: '100%', height: '100%', objectFit: 'cover', filter: plant.archived ? 'grayscale(0.7)' : 'none', opacity: plant.archived ? 0.7 : 1 }}
-          />
-        ) : (
-          <div style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '40px', opacity: plant.archived ? 0.5 : 1 }}>🌿</div>
-        )}
-        {multiSelect && (
-          <div style={{
-            position: 'absolute', top: '8px', right: '8px',
-            width: '22px', height: '22px', borderRadius: '50%',
-            background: isSelected ? '#4caf50' : 'rgba(0,0,0,0.5)',
-            border: '2px solid #fff',
-            display: 'flex', alignItems: 'center', justifyContent: 'center',
-            fontSize: '13px', color: '#fff',
-          }}>
-            {isSelected ? '✓' : ''}
-          </div>
-        )}
-      </div>
-      <div style={{ padding: '10px' }}>
-        <div style={{ color: plant.archived ? '#a8c5a0' : '#fff', fontWeight: '600', fontSize: '14px', marginBottom: '4px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-          {plant.name}
-        </div>
-        {plant.location && (
-          <div style={{ color: '#a8c5a0', fontSize: '12px', marginBottom: '6px' }}>📍 {plant.location}</div>
-        )}
-        {plant.archived ? (
-          <div style={{
-            display: 'inline-block', background: '#3a301844', color: '#e0c070',
-            borderRadius: '6px', padding: '2px 6px', fontSize: '11px', fontWeight: '600',
-            maxWidth: '100%', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-          }}>
-            {archiveReasonLabel(plant)}
-          </div>
-        ) : (
-          <div style={{
-            display: 'inline-block', background: status.color + '22', color: status.color,
-            borderRadius: '6px', padding: '2px 6px', fontSize: '11px', fontWeight: '600',
-          }}>
-            {status.icon} {status.label}
-          </div>
-        )}
-      </div>
-    </div>
+      {children}
+    </button>
   );
 }
 

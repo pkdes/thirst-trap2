@@ -1,6 +1,5 @@
-import { useState } from 'react';
-import { collection, writeBatch, doc, serverTimestamp, deleteField } from 'firebase/firestore';
-import { db } from '../lib/firebase';
+import { useState, useRef, useEffect } from 'react';
+import { logCare, undoCare } from '../lib/logging';
 import { playWaterDrop, playCompletionChime, vibrate } from '../lib/sounds';
 import { wateringStatus, thirstScore, startOfLocalDay } from '../lib/dates';
 import { useBackGuard } from '../hooks/useBackGuard';
@@ -10,17 +9,49 @@ const ELSEWHERE = '📦 Elsewhere';
 // Anything further out than this collapses into one "Later" group so the list
 // doesn't turn into a wall of single-plant date headers.
 const HORIZON_DAYS = 7;
+const UNDO_MS = 6000;
+const GROUP_KEY = 'tt:quencher-group';
 
-export default function ThirstQuencher({ plants, lastWatered, lastChecked = {}, user, household, onClose }) {
+function without(obj, key) {
+  const copy = { ...obj };
+  delete copy[key];
+  return copy;
+}
+
+function readGroup() {
+  try {
+    const v = localStorage.getItem(GROUP_KEY);
+    return v === 'room' ? 'room' : 'day';
+  } catch { return 'day'; }
+}
+
+export default function ThirstQuencher({ plants: livePlants, user, household, onClose }) {
   const [checked, setChecked] = useState(new Set());
   const [quenching, setQuenching] = useState(false);
   const [done, setDone] = useState(false);
-  const [groupBy, setGroupBy] = useState('day');
+  const [groupBy, setGroupBy] = useState(readGroup);
+  // Plants watered with a section's "Water all" (they show as done, and aren't logged again)
+  const [watered, setWatered] = useState(new Set());
+  // sectionKey -> {token, ids} while its Undo is on offer
+  const [undoable, setUndoable] = useState({});
+  // Once something is logged the live data would reshuffle sections under the
+  // user's thumb, so grouping holds the list as it was.
+  const [frozen, setFrozen] = useState(null);
+  const timers = useRef([]);
+
+  useEffect(() => () => timers.current.forEach(clearTimeout), []);
 
   useBackGuard(!done, onClose);
 
-  const statusFor = plant => wateringStatus(plant, lastWatered[plant.id], lastChecked[plant.id]);
-  const scoreFor = plant => thirstScore(plant, lastWatered[plant.id], lastChecked[plant.id]);
+  const plants = frozen ?? livePlants;
+
+  function chooseGroup(key) {
+    setGroupBy(key);
+    try { localStorage.setItem(GROUP_KEY, key); } catch { /* storage unavailable */ }
+  }
+
+  const statusFor = plant => wateringStatus(plant, plant.lastWateredAt, plant.lastCheckedAt);
+  const scoreFor = plant => thirstScore(plant, plant.lastWateredAt, plant.lastCheckedAt);
 
   const byThirst = [...plants].sort((a, b) => scoreFor(b) - scoreFor(a));
 
@@ -93,6 +124,7 @@ export default function ThirstQuencher({ plants, lastWatered, lastChecked = {}, 
   const sections = groupBy === 'day' ? dayGroups() : roomGroups();
 
   function toggle(plantId) {
+    if (watered.has(plantId)) return;
     setChecked(prev => {
       const next = new Set(prev);
       if (next.has(plantId)) {
@@ -110,20 +142,12 @@ export default function ThirstQuencher({ plants, lastWatered, lastChecked = {}, 
     if (!checked.size || quenching) return;
     setQuenching(true);
     try {
-      const batch = writeBatch(db);
-      const displayName = user.displayName?.split(' ')[0] || 'Someone';
-      checked.forEach(plantId => {
-        const logRef = doc(collection(db, 'wateringLogs'));
-        batch.set(logRef, {
-          plantId,
-          householdId: household.id,
-          wateredAt: serverTimestamp(),
-          loggedBy: { userId: user.uid, displayName },
-        });
-        // Watering supersedes any "check pushed this out" override
-        batch.update(doc(db, 'plants', plantId), { nextWateringOverride: deleteField() });
+      await logCare({
+        plants: plants.filter(p => checked.has(p.id)),
+        kind: 'water',
+        household,
+        user,
       });
-      await batch.commit();
       playCompletionChime();
       vibrate([50, 50, 100]);
       setDone(true);
@@ -131,6 +155,41 @@ export default function ThirstQuencher({ plants, lastWatered, lastChecked = {}, 
     } catch (err) {
       console.error(err);
       setQuenching(false);
+    }
+  }
+
+  async function waterAll(section) {
+    const targets = section.plants.filter(p => !checked.has(p.id) && !watered.has(p.id));
+    if (!targets.length || section.key in undoable) return;
+    try {
+      const token = await logCare({ plants: targets, kind: 'water', household, user });
+      const ids = targets.map(p => p.id);
+      setFrozen(f => f ?? livePlants);
+      setWatered(prev => new Set([...prev, ...ids]));
+      setUndoable(prev => ({ ...prev, [section.key]: { token, ids } }));
+      playWaterDrop();
+      vibrate([40, 40, 40]);
+      timers.current.push(setTimeout(() => {
+        setUndoable(prev => without(prev, section.key));
+      }, UNDO_MS));
+    } catch (err) {
+      console.error(err);
+    }
+  }
+
+  async function undoWaterAll(sectionKey) {
+    const entry = undoable[sectionKey];
+    if (!entry) return;
+    setUndoable(prev => without(prev, sectionKey));
+    try {
+      await undoCare(entry.token);
+      setWatered(prev => {
+        const next = new Set(prev);
+        entry.ids.forEach(id => next.delete(id));
+        return next;
+      });
+    } catch (err) {
+      console.error(err);
     }
   }
 
@@ -188,7 +247,7 @@ export default function ThirstQuencher({ plants, lastWatered, lastChecked = {}, 
           ].map(opt => (
             <button
               key={opt.key}
-              onClick={() => setGroupBy(opt.key)}
+              onClick={() => chooseGroup(opt.key)}
               style={{
                 padding: '5px 12px', borderRadius: '20px', fontSize: '12px',
                 fontWeight: groupBy === opt.key ? '700' : '400',
@@ -209,7 +268,7 @@ export default function ThirstQuencher({ plants, lastWatered, lastChecked = {}, 
         {sections.map(section => (
           <div key={section.key} style={{ marginBottom: '20px' }}>
             <div style={{
-              display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: '8px',
+              display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px',
               marginBottom: '8px', paddingBottom: '6px',
               borderBottom: `1px solid ${section.urgent ? '#2d4a2d' : '#1a2e1a'}`,
             }}>
@@ -219,13 +278,21 @@ export default function ThirstQuencher({ plants, lastWatered, lastChecked = {}, 
               }}>
                 {section.title}
               </span>
-              <span style={{ color: '#3a5a3a', fontSize: '11px', whiteSpace: 'nowrap' }}>
-                {section.subtitle ? `${section.subtitle} · ` : ''}
-                {section.plants.length} plant{section.plants.length !== 1 ? 's' : ''}
+              <span style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                <span style={{ color: '#3a5a3a', fontSize: '11px', whiteSpace: 'nowrap' }}>
+                  {section.subtitle ? `${section.subtitle} · ` : ''}
+                  {section.plants.length} plant{section.plants.length !== 1 ? 's' : ''}
+                </span>
+                <SectionAction
+                  pending={section.plants.filter(p => !checked.has(p.id) && !watered.has(p.id))}
+                  undo={undoable[section.key]}
+                  onWaterAll={() => waterAll(section)}
+                  onUndo={() => undoWaterAll(section.key)}
+                />
               </span>
             </div>
             {section.plants.map(plant => {
-              const isChecked = checked.has(plant.id);
+              const isChecked = checked.has(plant.id) || watered.has(plant.id);
               const status = statusFor(plant);
               const overdue = status.state === 'late' || status.state === 'never';
               const dueLabel = status.shortLabel;
@@ -317,5 +384,30 @@ export default function ThirstQuencher({ plants, lastWatered, lastChecked = {}, 
         </button>
       </div>
     </div>
+  );
+}
+
+function SectionAction({ pending, undo, onWaterAll, onUndo }) {
+  const base = {
+    minHeight: '44px', padding: '0 12px', borderRadius: '10px', fontSize: '12px', fontWeight: '700',
+    cursor: 'pointer', whiteSpace: 'nowrap', textTransform: 'none', letterSpacing: 0,
+  };
+  if (undo) {
+    return (
+      <button type="button" onClick={onUndo} style={{ ...base, background: 'transparent', color: '#a8e080', border: '1px solid #4caf50' }}>
+        Watered {undo.ids.length} · Undo
+      </button>
+    );
+  }
+  if (!pending.length) return null;
+  return (
+    <button
+      type="button"
+      aria-label={`Water all ${pending.length} unchecked plants in this section`}
+      onClick={onWaterAll}
+      style={{ ...base, background: '#1e331e', color: '#5ba3be', border: '1px solid #5ba3be' }}
+    >
+      💧 Water all
+    </button>
   );
 }

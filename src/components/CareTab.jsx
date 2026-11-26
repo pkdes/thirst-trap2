@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
-import { collection, query, where, onSnapshot, addDoc, serverTimestamp, doc, updateDoc, deleteField, Timestamp } from 'firebase/firestore';
+import { collection, query, where, onSnapshot, doc, updateDoc, Timestamp } from 'firebase/firestore';
 import { db } from '../lib/firebase';
+import { logCare } from '../lib/logging';
 import { format, isSameDay, isAfter, startOfDay, isToday } from 'date-fns';
 import { toDate, startOfLocalDay, wateringStatus, fertilizerStatus, CARE_COLORS } from '../lib/dates';
 import { useBackGuard } from '../hooks/useBackGuard';
@@ -38,13 +39,17 @@ export default function CareTab({ plant, user, household, onPlantUpdate }) {
   const water = wateringStatus(plant, lastWateredTs, lastCheckTs);
   const fert = fertilizerStatus(plant, lastFertTs);
 
-  function stampFor(date) {
-    return date
-      ? Timestamp.fromDate(new Date(date.getFullYear(), date.getMonth(), date.getDate(), 12, 0, 0))
-      : serverTimestamp();
-  }
+  // The detail screen's plant is a snapshot from when it was opened, so overlay
+  // the freshest last-care times from the live log subscriptions.
+  const careSubject = {
+    ...plant,
+    lastWateredAt: lastWateredTs,
+    lastCheckedAt: lastCheckTs,
+    lastFertilizedAt: lastFertTs,
+  };
 
-  const loggedBy = () => ({ userId: user.uid, displayName: user.displayName?.split(' ')[0] || 'Someone' });
+  const record = (kind, extra = {}) =>
+    logCare({ plants: [careSubject], kind, date: targetDate, household, user, ...extra });
 
   async function logWatering(confirmed = false) {
     if (busy) return;
@@ -62,14 +67,8 @@ export default function CareTab({ plant, user, household, onPlantUpdate }) {
     setConfirmDouble(null);
     setBusy('water');
     try {
-      await addDoc(collection(db, 'wateringLogs'), {
-        plantId: plant.id,
-        householdId: household.id,
-        wateredAt: stampFor(targetDate),
-        loggedBy: loggedBy(),
-      });
-      await updateDoc(doc(db, 'plants', plant.id), { nextWateringOverride: deleteField() });
-      onPlantUpdate({ ...plant, nextWateringOverride: null });
+      await record('water');
+      if (!targetDate) onPlantUpdate({ ...plant, nextWateringOverride: null });
       setTargetDate(null);
       setSelectedDay(null);
     } catch (err) {
@@ -94,12 +93,7 @@ export default function CareTab({ plant, user, household, onPlantUpdate }) {
     setConfirmDouble(null);
     setBusy('fertilize');
     try {
-      await addDoc(collection(db, 'fertilizerLogs'), {
-        plantId: plant.id,
-        householdId: household.id,
-        fertilizedAt: stampFor(targetDate),
-        loggedBy: loggedBy(),
-      });
+      await record('feed');
       setTargetDate(null);
       setSelectedDay(null);
     } catch (err) {
@@ -113,22 +107,17 @@ export default function CareTab({ plant, user, household, onPlantUpdate }) {
     setBusy('check');
     setShowCheckPopup(false);
     try {
-      await addDoc(collection(db, 'checkLogs'), {
-        plantId: plant.id,
-        householdId: household.id,
-        checkedAt: serverTimestamp(),
-        loggedBy: loggedBy(),
-      });
       let pushDays = null;
       if (intervalAction === 'tomorrow') pushDays = 1;
       else if (intervalAction === 'cycle' && plant.waterIntervalDays) pushDays = plant.waterIntervalDays;
 
+      // Checks are always stamped "now", never the calendar's target date
+      await logCare({ plants: [careSubject], kind: 'check', household, user, pushDays });
+
       if (pushDays !== null) {
         const next = startOfLocalDay(new Date());
         next.setDate(next.getDate() + pushDays);
-        const override = Timestamp.fromDate(next);
-        await updateDoc(doc(db, 'plants', plant.id), { nextWateringOverride: override });
-        onPlantUpdate({ ...plant, nextWateringOverride: override });
+        onPlantUpdate({ ...plant, nextWateringOverride: Timestamp.fromDate(next) });
       }
     } catch (err) {
       console.error('Check log failed', err);

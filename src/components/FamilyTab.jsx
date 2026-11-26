@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react';
 import { collection, query, where, onSnapshot, addDoc, updateDoc, deleteDoc, doc, serverTimestamp, Timestamp, writeBatch } from 'firebase/firestore';
 import { db } from '../lib/firebase';
 import { format } from 'date-fns';
-import { toDate } from '../lib/dates';
+import { toDate, todayISO } from '../lib/dates';
 import { FAMILY_EVENT_TYPES, eventType, makeFamilyCode } from '../lib/families';
 import { useBackGuard } from '../hooks/useBackGuard';
 
@@ -396,7 +396,7 @@ function JoinFamilyModal({ families, busy, onCreate, onJoin, onClose }) {
 
 function LogEventModal({ plant, busy, onSave, onClose }) {
   const [type, setType] = useState('repot');
-  const [date, setDate] = useState(new Date().toISOString().split('T')[0]);
+  const [date, setDate] = useState(todayISO());
   const [notes, setNotes] = useState('');
   const [makeChild, setMakeChild] = useState(false);
   const [childName, setChildName] = useState('');
@@ -439,7 +439,7 @@ function LogEventModal({ plant, busy, onSave, onClose }) {
       <p style={{ color: '#6a8f6a', fontSize: '12px', margin: '-10px 0 16px' }}>{selected.hint}</p>
 
       <label style={labelStyle}>When</label>
-      <input type="date" value={date} max={new Date().toISOString().split('T')[0]} onChange={e => setDate(e.target.value)} style={inputStyle} />
+      <input type="date" value={date} max={todayISO()} onChange={e => setDate(e.target.value)} style={inputStyle} />
 
       {canSpawn && (
         <div style={{ marginBottom: '16px' }}>
