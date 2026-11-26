@@ -22,5 +22,5 @@ export const storage = getStorage(app);
 export const functions = getFunctions(app);
 export const googleProvider = new GoogleAuthProvider();
 let messaging = null;
-try { messaging = getMessaging(app); } catch (_) { /* not supported on this browser */ }
+try { messaging = getMessaging(app); } catch { /* not supported on this browser */ }
 export { messaging };

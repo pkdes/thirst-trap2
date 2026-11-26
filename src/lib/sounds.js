@@ -22,7 +22,7 @@ export function playWaterDrop() {
     gain.gain.exponentialRampToValueAtTime(0.001, c.currentTime + 0.18);
     osc.start(c.currentTime);
     osc.stop(c.currentTime + 0.18);
-  } catch {}
+  } catch { /* audio is optional */ }
 }
 
 export function playCompletionChime() {
@@ -41,9 +41,9 @@ export function playCompletionChime() {
       osc.start(t);
       osc.stop(t + 0.35);
     });
-  } catch {}
+  } catch { /* audio is optional */ }
 }
 
 export function vibrate(pattern = 50) {
-  try { navigator.vibrate?.(pattern); } catch {}
+  try { navigator.vibrate?.(pattern); } catch { /* unsupported */ }
 }
