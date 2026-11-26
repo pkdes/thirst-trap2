@@ -40,8 +40,36 @@ service cloud.firestore {
 
     // --- users ---------------------------------------------------------------
     // You can only ever see or touch your own profile.
+    //
+    // householdId is the key to every other collection, so it can only point at a
+    // household that already lists you as a member. Without this, anyone could
+    // write a guessed invite code here and read that household without joining
+    // (and without counting against the 2-member cap).
+    function householdLists(householdId, uid) {
+      return exists(/databases/$(database)/documents/households/$(householdId))
+        && uid in get(/databases/$(database)/documents/households/$(householdId)).data.members;
+    }
+
+    function userKeys() {
+      return ['householdId', 'displayName', 'email', 'photoURL', 'notifications'];
+    }
+
+    function validUserFields() {
+      let d = request.resource.data;
+      return (!('householdId' in d) || householdLists(d.householdId, request.auth.uid))
+        && (!('notifications' in d) || d.notifications is map);
+    }
+
     match /users/{userId} {
-      allow read, write: if signedIn() && request.auth.uid == userId;
+      allow read, delete: if signedIn() && request.auth.uid == userId;
+      allow create: if signedIn() && request.auth.uid == userId
+        && request.resource.data.keys().hasOnly(userKeys())
+        && validUserFields();
+      // Checks changed keys only, so a legacy field on an existing profile
+      // doesn't lock its owner out of saving notification settings.
+      allow update: if signedIn() && request.auth.uid == userId
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(userKeys())
+        && validUserFields();
     }
 
     // --- households ----------------------------------------------------------
@@ -73,21 +101,32 @@ service cloud.firestore {
       allow delete: if mine(resource.data);
     }
 
+    // A care log can be corrected (its date, who edited it) but never re-pointed
+    // at another plant or household.
+    function logEditOnly(dateField) {
+      return request.resource.data.diff(resource.data).affectedKeys()
+        .hasOnly([dateField, 'editedBy', 'editedAt'])
+        && request.resource.data[dateField] is timestamp;
+    }
+
     match /wateringLogs/{logId} {
       allow read: if mine(resource.data);
-      allow create, update: if mineForWrite();
+      allow create: if mineForWrite();
+      allow update: if mineForWrite() && logEditOnly('wateredAt');
       allow delete: if mine(resource.data);
     }
 
     match /checkLogs/{logId} {
       allow read: if mine(resource.data);
-      allow create, update: if mineForWrite();
+      allow create: if mineForWrite();
+      allow update: if mineForWrite() && logEditOnly('checkedAt');
       allow delete: if mine(resource.data);
     }
 
     match /fertilizerLogs/{logId} {
       allow read: if mine(resource.data);
-      allow create, update: if mineForWrite();
+      allow create: if mineForWrite();
+      allow update: if mineForWrite() && logEditOnly('fertilizedAt');
       allow delete: if mine(resource.data);
     }
 

@@ -85,6 +85,43 @@ await check('newbie can create their own household', () =>
 await check('newbie CANNOT create a household owned by someone else', () =>
   assertFails(setDoc(doc(newbie, 'households/DDD444'), { name: 'X', members: ['amy'] })));
 
+console.log('\n--- user doc: householdId must be a household that lists you ---');
+const intruder = env.authenticatedContext('intruder').firestore();
+await check('intruder CANNOT point their user doc at a household they are not in', () =>
+  assertFails(setDoc(doc(intruder, 'users/intruder'), { householdId: HOUSE_A, displayName: 'X' })));
+await check('so intruder still CANNOT read that household\'s plants', () =>
+  assertFails(getDoc(doc(intruder, 'plants/plantA'))));
+await check('amy CANNOT switch her user doc to another household', () =>
+  assertFails(updateDoc(doc(amy, 'users/amy'), { householdId: HOUSE_B })));
+await check('amy can update her own notification settings', () =>
+  assertSucceeds(updateDoc(doc(amy, 'users/amy'), { 'notifications.enabled': true, 'notifications.time': 'morning' })));
+await check('amy CANNOT add arbitrary keys to her user doc', () =>
+  assertFails(updateDoc(doc(amy, 'users/amy'), { isAdmin: true })));
+await check('newbie (now a member of B) can set householdId to B', () =>
+  assertSucceeds(setDoc(doc(newbie, 'users/newbie'), { householdId: HOUSE_B, displayName: 'N', email: 'n@x', photoURL: null })));
+await check('newbie can set householdId to the household they created', () =>
+  assertSucceeds(setDoc(doc(newbie, 'users/newbie'), { householdId: 'CCC333', displayName: 'N' })));
+
+console.log('\n--- care log edits ---');
+const { Timestamp } = await import('firebase/firestore');
+await env.withSecurityRulesDisabled(async ctx => {
+  await setDoc(doc(ctx.firestore(), 'wateringLogs/logEdit'),
+    { householdId: HOUSE_A, plantId: 'plantA', wateredAt: Timestamp.now(), loggedBy: { userId: 'amy' } });
+});
+await check('amy can change the date of her household\'s log', () =>
+  assertSucceeds(updateDoc(doc(amy, 'wateringLogs/logEdit'),
+    { wateredAt: Timestamp.fromDate(new Date(2026, 0, 1, 12)), editedBy: 'amy', editedAt: Timestamp.now() })));
+await check('amy CANNOT re-point a log at another plant', () =>
+  assertFails(updateDoc(doc(amy, 'wateringLogs/logEdit'), { plantId: 'plantB' })));
+await check('amy CANNOT rewrite who logged it', () =>
+  assertFails(updateDoc(doc(amy, 'wateringLogs/logEdit'), { loggedBy: { userId: 'pujan' } })));
+await check('amy CANNOT set the date to a non-timestamp', () =>
+  assertFails(updateDoc(doc(amy, 'wateringLogs/logEdit'), { wateredAt: 'yesterday' })));
+await check('stranger CANNOT edit amy\'s log', () =>
+  assertFails(updateDoc(doc(stranger, 'wateringLogs/logEdit'), { wateredAt: Timestamp.now() })));
+await check('amy can delete her household\'s log', () =>
+  assertSucceeds(deleteDoc(doc(amy, 'wateringLogs/logEdit'))));
+
 console.log(`\n${pass} passed, ${fail} failed\n`);
 await env.cleanup();
 process.exit(fail ? 1 : 0);
