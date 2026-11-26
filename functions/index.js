@@ -126,6 +126,29 @@ exports.analyzePlantHealth = onCall(
   },
 );
 
+/** Calendar date (YYYY-MM-DD) of `date` in the given IANA timezone. */
+function calendarDateKey(date, timeZone) {
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone, year: 'numeric', month: '2-digit', day: '2-digit',
+  }).format(date);
+}
+
+/** Whole calendar days from key `from` to key `to` (negative if `to` is earlier). */
+function daysBetweenKeys(from, to) {
+  return Math.round((Date.parse(`${to}T00:00:00Z`) - Date.parse(`${from}T00:00:00Z`)) / 86400000);
+}
+
+// Newest `field` timestamp across a plant's logs, or null if there are none.
+async function latestTimestamp(collection, field, plantId) {
+  const snap = await db.collection(collection).where('plantId', '==', plantId).get();
+  let best = null;
+  for (const d of snap.docs) {
+    const ts = d.get(field);
+    if (ts && (!best || ts.toMillis() > best.toMillis())) best = ts;
+  }
+  return best;
+}
+
 exports.sendWateringReminders = onSchedule('0 * * * *', async () => {
   const now = new Date();
 
@@ -163,37 +186,44 @@ exports.sendWateringReminders = onSchedule('0 * * * *', async () => {
         if (plant.archived) continue;
         if (!plant.waterIntervalDays) continue;
 
-        // If a check pushed the schedule, use the override date
-        if (plant.nextWateringOverride) {
-          const overrideDate = plant.nextWateringOverride.toDate();
-          overrideDate.setHours(0, 0, 0, 0);
-          const today = new Date(); today.setHours(0, 0, 0, 0);
-          const daysUntil = Math.round((overrideDate - today) / (1000 * 60 * 60 * 24));
-          if (daysUntil <= 0) thirstyPlants.push({ name: plant.name, overdue: daysUntil < 0 });
-          continue;
+        let lastWatered = plant.lastWateredAt;
+        let lastChecked = plant.lastCheckedAt;
+        if (lastWatered === undefined) {
+          // TODO: remove after scripts/backfill-last-care.mjs has been run. Plants
+          // without the denormalized fields fall back to a per-plant log query.
+          lastWatered = await latestTimestamp('wateringLogs', 'wateredAt', plant.id);
+          if (lastChecked === undefined) {
+            lastChecked = await latestTimestamp('checkLogs', 'checkedAt', plant.id);
+          }
         }
 
-        // Get all watering logs for this plant, sort to find most recent
-        const logsSnap = await db.collection('wateringLogs')
-          .where('plantId', '==', plant.id)
-          .get();
+        // Mirrors wateringStatus() in src/lib/dates.js.
+        const lastWateredDate = lastWatered?.toDate?.() ?? null;
+        const lastCheckedDate = lastChecked?.toDate?.() ?? null;
+        const todayKey = calendarDateKey(now, timezone);
+        const ago = lastWateredDate
+          ? daysBetweenKeys(calendarDateKey(lastWateredDate, timezone), todayKey)
+          : null;
+        const checkedAfterWatering =
+          !!lastCheckedDate &&
+          lastCheckedDate.getTime() > (lastWateredDate ? lastWateredDate.getTime() : -Infinity);
 
-        if (logsSnap.empty) {
-          thirstyPlants.push({ name: plant.name, overdue: true });
-          continue;
-        }
+        // A check can push the schedule out; the override wins until the next watering.
+        const overrideDate =
+          checkedAfterWatering && plant.nextWateringOverride
+            ? plant.nextWateringOverride.toDate?.() ?? null
+            : null;
+        const override = overrideDate
+          ? daysBetweenKeys(todayKey, calendarDateKey(overrideDate, timezone))
+          : null;
 
-        const logs = logsSnap.docs.map(d => d.data());
-        logs.sort((a, b) => (b.wateredAt?.seconds ?? 0) - (a.wateredAt?.seconds ?? 0));
-        const lastWater = logs[0].wateredAt?.toDate();
-        if (!lastWater) continue;
+        const until = override !== null
+          ? override
+          : ago === null ? null : plant.waterIntervalDays - ago;
 
-        const lastDay = new Date(lastWater); lastDay.setHours(0, 0, 0, 0);
-        const today = new Date(); today.setHours(0, 0, 0, 0);
-        const daysSince = Math.round((today - lastDay) / (1000 * 60 * 60 * 24));
-        const daysUntil = plant.waterIntervalDays - daysSince;
-
-        if (daysUntil <= 0) thirstyPlants.push({ name: plant.name, overdue: daysUntil < 0 });
+        // Never watered counts as overdue, as before.
+        if (until === null) thirstyPlants.push({ name: plant.name, overdue: true });
+        else if (until <= 0) thirstyPlants.push({ name: plant.name, overdue: until < 0 });
       }
 
       if (thirstyPlants.length === 0) continue;
