@@ -76,6 +76,10 @@ await check('a signed-in user can GET a household by its invite code', () =>
   assertSucceeds(getDoc(doc(newbie, 'households/' + HOUSE_B))));
 await check('but CANNOT enumerate households', () =>
   assertFails(getDocs(collection(newbie, 'households'))));
+await check('newbie CANNOT take over a 1-member household by replacing its member', () =>
+  assertFails(updateDoc(doc(newbie, 'households/' + HOUSE_B), { members: ['newbie'] })));
+await check('newbie CANNOT rename a household while joining', () =>
+  assertFails(updateDoc(doc(newbie, 'households/' + HOUSE_B), { members: ['stranger', 'newbie'], name: 'Mine' })));
 await check('newbie can join a household with room (adds self)', () =>
   assertSucceeds(updateDoc(doc(newbie, 'households/' + HOUSE_B), { members: ['stranger', 'newbie'] })));
 await check('newbie CANNOT join a FULL household', () =>

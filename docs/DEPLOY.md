@@ -75,13 +75,35 @@ The Anthropic key lives in Secret Manager (`firebase functions:secrets:set ANTHR
 
 ## Manual first deploy (laptop)
 
+**v2 has a required order.** The v2 app reads each plant's `lastWateredAt` /
+`lastCheckedAt` / `lastFertilizedAt` instead of the logs. Deploy the app before
+those fields exist and every plant shows as never watered.
+
 ```bash
 cp .env.example .env   # fill in values
 npm ci && npm ci --prefix functions
+gcloud auth application-default login
+
+# 1. Rules + indexes first (the backfill doesn't need them, but the app does)
+npx firebase deploy --only firestore
+
+# 2. Backfill the last-care fields: dry run, check the table, then apply
+node scripts/backfill-last-care.mjs
+node scripts/backfill-last-care.mjs --apply
+
+# 3. App, functions, storage rules
 npm run build && npx firebase deploy
+
+# 4. Keep Artifact Registry tidy so CI's `--force` doesn't need admin rights
+npx firebase functions:artifacts:setpolicy
+
+# 5. Once BOTH phones have reloaded onto v2, re-run the backfill dry run.
+#    An old v1 tab that logged in between won't have updated the fields.
+node scripts/backfill-last-care.mjs          # expect 0 changes; --apply if not
 ```
 
-Do this once before CI so APIs, the functions secret and the first function revisions exist.
+Do this once before CI so APIs, the functions secret, the indexes and the first
+function revisions exist.
 
 ## Rollback
 
@@ -95,5 +117,5 @@ Functions and rules have no one-click rollback: revert the commit on `main` and 
   binding the secret to a function). Add what the error names.
 - Required APIs (cloudbuild, cloudfunctions, run, artifactregistry, eventarc, cloudscheduler,
   firebaserules, firebasehosting) must be enabled; the manual deploy usually enables them.
-- `firebase.json` has no `firestore.indexes` entry yet; add `firestore.indexes.json` before relying on index deploys.
-- `npm run test:unit` must exist in `package.json` or the workflow fails.
+- `--force` deletes Firestore indexes that exist in the console but not in
+  `firestore.indexes.json`. None are needed today; add any you create by hand to the file.

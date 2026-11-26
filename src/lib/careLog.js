@@ -10,7 +10,7 @@
 // run against the emulator in tests; src/lib/logging.js binds them to the app's db.
 
 import {
-  collection, doc, writeBatch, getDocs, query, where,
+  collection, doc, writeBatch, getDocs, getDoc, query, where,
   Timestamp, deleteField,
 } from 'firebase/firestore';
 import { startOfLocalDay } from './dates.js';
@@ -28,9 +28,15 @@ export function kindOf(name) {
   return k;
 }
 
-/** Back-dated entries are stamped at local noon so they never slip across midnight. */
+/**
+ * Back-dated entries are stamped at local noon so they never slip across
+ * midnight. Picking *today* stamps now: noon would be in the future before 12:00
+ * and make a later check that morning look older than the watering.
+ */
 export function stampFor(date) {
-  if (!date) return Timestamp.now();
+  const now = new Date();
+  if (!date || (date.getFullYear() === now.getFullYear() && date.getMonth() === now.getMonth()
+    && date.getDate() === now.getDate())) return Timestamp.now();
   return Timestamp.fromDate(new Date(date.getFullYear(), date.getMonth(), date.getDate(), 12, 0, 0));
 }
 
@@ -73,22 +79,24 @@ export async function logCare(db, { plants, kind, date = null, household, user, 
       loggedBy: loggedByFor(user),
     });
 
-    prior.push({
-      id: plant.id,
-      last: plant[k.last] ?? null,
-      override: plant.nextWateringOverride ?? null,
-    });
-
     const newest = later(plant[k.last] ?? null, at);
     const update = { [k.last]: newest };
+    // What this log did to the override, so undo only reverts its own change.
+    let wrote;
 
     // A watering resets the schedule — but only if it is now the latest one
     // (back-dating an old watering shouldn't clear a check made since).
-    if (kind === 'water' && newest === at) update.nextWateringOverride = deleteField();
+    if (kind === 'water' && newest === at) {
+      update.nextWateringOverride = deleteField();
+      wrote = null;
+    }
 
     if (kind === 'check' && pushDays !== null) {
       update.nextWateringOverride = Timestamp.fromDate(addDays(startOfLocalDay(new Date()), pushDays));
+      wrote = millis(update.nextWateringOverride);
     }
+
+    prior.push({ id: plant.id, override: plant.nextWateringOverride ?? null, wrote });
 
     batch.update(doc(db, 'plants', plant.id), update);
   }
@@ -131,8 +139,11 @@ export async function undoCare(db, token) {
   for (const p of token.prior) {
     const last = await latestFor(db, k, token.householdId, p.id, token.logIds);
     const update = { [k.last]: last };
-    if (token.kind === 'water' || token.kind === 'check') {
-      update.nextWateringOverride = p.override ?? deleteField();
+    // Restore the override only if it is still what this log left behind;
+    // otherwise the other household member has changed it since, and theirs wins.
+    if (p.wrote !== undefined) {
+      const current = (await getDoc(doc(db, 'plants', p.id))).get('nextWateringOverride') ?? null;
+      if (millis(current) === p.wrote) update.nextWateringOverride = p.override ?? deleteField();
     }
     batch.update(doc(db, 'plants', p.id), update);
   }
@@ -179,7 +190,10 @@ export async function editCare(db, { log, kind, newKind = kind, newDate = null, 
   if (newKind === kind) {
     batch.update(doc(db, from.coll, log.id), { [from.at]: at, editedBy, editedAt });
     const others = await latestFor(db, from, householdId, log.plantId, [log.id]);
-    batch.update(doc(db, 'plants', log.plantId), { [from.last]: later(others, at) });
+    const newest = later(others, at);
+    const update = { [from.last]: newest };
+    if (newKind === 'water' && newest === at) update.nextWateringOverride = deleteField();
+    batch.update(doc(db, 'plants', log.plantId), update);
     await batch.commit();
     return log.id;
   }
@@ -196,10 +210,11 @@ export async function editCare(db, { log, kind, newKind = kind, newDate = null, 
   });
   const fromLast = await latestFor(db, from, householdId, log.plantId, [log.id]);
   const toLast = await latestFor(db, to, householdId, log.plantId);
-  batch.update(doc(db, 'plants', log.plantId), {
-    [from.last]: fromLast,
-    [to.last]: later(toLast, at),
-  });
+  const toNewest = later(toLast, at);
+  const update = { [from.last]: fromLast, [to.last]: toNewest };
+  // Same rule as logCare: a watering that is now the latest resets the schedule.
+  if (newKind === 'water' && toNewest === at) update.nextWateringOverride = deleteField();
+  batch.update(doc(db, 'plants', log.plantId), update);
   await batch.commit();
   return newRef.id;
 }

@@ -6,7 +6,8 @@
 // Dry run by default: prints planned changes and counts. Writes only with --apply.
 // Auth: Application Default Credentials (gcloud auth application-default login), or set
 // FIRESTORE_EMULATOR_HOST to target the emulator. Project defaults to .firebaserc "default".
-// A field is deleted from the plant when it has no logs. Re-running is safe.
+// A plant with no logs of a kind gets an explicit null ("never"); a missing field
+// means "not backfilled" to the reminder function. Re-running is safe.
 
 import { createRequire } from 'node:module';
 import { readFileSync } from 'node:fs';

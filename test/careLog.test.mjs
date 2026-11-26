@@ -115,6 +115,27 @@ await check('changing water -> check moves the log and fixes both fields', async
   if (ms(p1.lastCheckedAt) < noon(2026, 11, 22)) throw new Error('lastCheckedAt not moved forward');
 });
 
+console.log('\n--- review fixes ---');
+await check('editing a pushed check into a watering clears the override', async () => {
+  const t = await lc({ plants: [await plant('p2')], kind: 'check', pushDays: 3, household, user });
+  if (!(await plant('p2')).nextWateringOverride) throw new Error('setup: no override');
+  const log = (await logsOf('checkLogs')).find(l => l.id === t.logIds[0]);
+  await editCare(db, { log, kind: 'check', newKind: 'water', user, householdId: H });
+  eq((await plant('p2')).nextWateringOverride, undefined, 'override');
+});
+await check('undo does not clobber an override the partner set in the meantime', async () => {
+  const t = await lc({ plants: [await plant('p2')], kind: 'water', household, user });
+  await lc({ plants: [await plant('p2')], kind: 'check', pushDays: 5, household, user: { uid: 'amy', displayName: 'Partner' } });
+  const theirs = ms((await plant('p2')).nextWateringOverride);
+  await undoCare(db, t);
+  eq(ms((await plant('p2')).nextWateringOverride), theirs, 'partner override kept');
+});
+await check('logging "today" via a date picker stamps now, not a future noon', async () => {
+  const t = await lc({ plants: [await plant('p2')], kind: 'feed', date: new Date(), household, user });
+  const log = (await logsOf('fertilizerLogs')).find(l => l.id === t.logIds[0]);
+  if (ms(log.fertilizedAt) > Date.now() + 1000) throw new Error('stamped in the future');
+});
+
 console.log(`\n${pass} passed, ${fail} failed\n`);
 await env.cleanup();
 process.exit(fail ? 1 : 0);
