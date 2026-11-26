@@ -10,7 +10,8 @@
     "preview": "vite preview",
     "test:rules": "firebase emulators:exec --only firestore --project thirst-trap-test \"node test/rules.test.mjs\"",
     "test:storage": "firebase emulators:exec --only firestore,storage --project thirst-trap-test \"node test/storage.test.mjs\"",
-    "test": "npm run test:rules && npm run test:storage"
+    "test": "npm run test:rules && npm run test:storage",
+    "test:unit": "vitest run"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.102.0",
@@ -31,6 +32,7 @@
     "eslint-plugin-react-refresh": "^0.5.2",
     "firebase-tools": "^15.19.1",
     "globals": "^17.6.0",
-    "vite": "^8.0.12"
+    "vite": "^8.0.12",
+    "vitest": "^5.1.2"
   }
 }

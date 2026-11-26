@@ -6,6 +6,8 @@
 // elapsed milliseconds, which made "In 2 days" linger a day too long and let the
 // "Tomorrow" step get skipped entirely.
 
+import { addDays } from 'date-fns';
+
 export const CARE_COLORS = {
   water: '#5ba3be',
   fertilizer: '#c06080',
@@ -27,6 +29,14 @@ export function startOfLocalDay(value) {
   const d = new Date(value);
   d.setHours(0, 0, 0, 0);
   return d;
+}
+
+/** Local calendar date as 'YYYY-MM-DD' (toISOString would give the UTC date). */
+export function todayISO(date = new Date()) {
+  const y = String(date.getFullYear()).padStart(4, '0');
+  const m = String(date.getMonth() + 1).padStart(2, '0');
+  const d = String(date.getDate()).padStart(2, '0');
+  return `${y}-${m}-${d}`;
 }
 
 /** Whole calendar days from `from` to `to`. Negative when `to` is earlier. */
@@ -73,6 +83,27 @@ export function agoLabel(days) {
 }
 
 /**
+ * Local-midnight Date the next watering is due, using the same rules as
+ * wateringStatus: a check after the last watering with a nextWateringOverride
+ * wins over the interval. Returns null when there is no interval, or when the
+ * plant has never been watered and has no override (nothing to count from).
+ * Past dates are returned as-is when overdue.
+ */
+export function nextDueDate(plant, lastWateredTs, lastCheckedTs, today = new Date()) {
+  void today; // due date is independent of "today"; kept for a uniform call signature
+  const interval = plant?.waterIntervalDays || null;
+  if (!interval) return null;
+  const watered = toDate(lastWateredTs);
+  const checkedAfterWatering =
+    !!lastCheckedTs && secondsOf(lastCheckedTs) > secondsOf(lastWateredTs);
+  const override =
+    checkedAfterWatering && plant?.nextWateringOverride ? toDate(plant.nextWateringOverride) : null;
+  if (override) return startOfLocalDay(override);
+  if (!watered) return null;
+  return addDays(startOfLocalDay(watered), interval);
+}
+
+/**
  * Everything the UI needs to render a plant's watering badge.
  *
  * state is one of:
@@ -88,13 +119,6 @@ export function wateringStatus(plant, lastWateredTs, lastCheckedTs) {
   const checkedAfterWatering =
     !!lastCheckedTs && secondsOf(lastCheckedTs) > secondsOf(lastWateredTs);
 
-  // A check can push the next watering out; that override wins over the interval
-  // until the plant is actually watered again (watering clears it).
-  const override =
-    checkedAfterWatering && plant?.nextWateringOverride
-      ? daysUntil(plant.nextWateringOverride)
-      : null;
-
   if (!interval) {
     return {
       interval: null,
@@ -109,7 +133,10 @@ export function wateringStatus(plant, lastWateredTs, lastCheckedTs) {
     };
   }
 
-  const until = override !== null ? override : ago === null ? null : interval - ago;
+  // nextDueDate applies the check override (which wins over the interval until the
+  // plant is watered again), so the day count always matches the due date.
+  const due = nextDueDate(plant, lastWateredTs, lastCheckedTs);
+  const until = due === null ? null : calendarDaysBetween(new Date(), due);
 
   let state;
   if (until === null) state = 'never';
@@ -176,6 +203,37 @@ export function fertilizerStatus(plant, lastFertilizedTs) {
     color:
       state === 'never' || state === 'late' ? CARE_COLORS.late : CARE_COLORS.fertilizer,
   };
+}
+
+function projectFrom(first, interval, rangeStart, rangeEnd, today) {
+  const start = startOfLocalDay(rangeStart);
+  const end = startOfLocalDay(rangeEnd);
+  const todayStart = startOfLocalDay(today);
+  const out = [];
+  // Overdue (or never done) items show on today; later ones follow the interval.
+  let d = first === null || first < todayStart ? todayStart : first;
+  for (let i = 0; d <= end && i < 10000; i++) {
+    if (d >= start) out.push(d);
+    d = addDays(d, interval);
+  }
+  return out;
+}
+
+/** Local-midnight dates in [rangeStart, rangeEnd] when watering is projected. */
+export function projectDueDates(plant, lastWateredTs, lastCheckedTs, rangeStart, rangeEnd, today = new Date()) {
+  const interval = plant?.waterIntervalDays || null;
+  if (!interval) return [];
+  const first = nextDueDate(plant, lastWateredTs, lastCheckedTs, today);
+  return projectFrom(first, interval, rangeStart, rangeEnd, today);
+}
+
+/** Same as projectDueDates, mirroring fertilizerStatus (no override concept). */
+export function projectFertilizerDates(plant, lastFertilizedTs, rangeStart, rangeEnd, today = new Date()) {
+  const interval = plant?.fertilizerIntervalDays || null;
+  if (!interval) return [];
+  const last = toDate(lastFertilizedTs);
+  const first = last ? addDays(startOfLocalDay(last), interval) : null;
+  return projectFrom(first, interval, rangeStart, rangeEnd, today);
 }
 
 /** Sort key for the "Thirstiest" sort — higher means needs water sooner. */
